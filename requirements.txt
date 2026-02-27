@@ -1,7 +1,4 @@
 streamlit
-opencv-python-headless
-easyocr
-pytesseract
-Pillow
 pandas
-numpy
+Pillow
+google-generativeai

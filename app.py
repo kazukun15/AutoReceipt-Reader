@@ -1,92 +1,115 @@
 import streamlit as st
 import pandas as pd
 from PIL import Image, ImageOps
-from utils.gemini_engine import analyze_receipt_with_gemini
-from utils.csv_export import convert_to_csv
+import google.generativeai as genai
+import json
+import re
 
 # ==========================================
-# 🎨 UI設定（モダンデザイン）
+# 🎨 1. UI設定 & モダンデザイン
 # ==========================================
 st.set_page_config(
-    page_title="ReceiptFlow | Gemini 2.5 Flash",
+    page_title="ReceiptFlow | Gemini 2.5",
     page_icon="🧾",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# セッション管理
+# セッション状態の初期化
 if "parsed_items" not in st.session_state: st.session_state.parsed_items = []
 if "ocr_completed" not in st.session_state: st.session_state.ocr_completed = False
 
 # ==========================================
-# ⚙️ サイドバー（操作パネル）
+# 🧠 2. Gemini 2.5 Flash エンジン (内部実装)
+# ==========================================
+def run_gemini_analysis(image):
+    """Gemini APIを使用して画像を解析するコアロジック"""
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash') # 2026年最新Flashモデル
+
+    prompt = """
+    レシートを解析し、JSONで返してください。
+    項目: store_name, date(YYYY/MM/DD), items(商品名, 金額), total_price
+    JSONデータのみを出力してください。
+    """
+    
+    response = model.generate_content([prompt, image])
+    json_text = re.search(r'\{.*\}', response.text, re.DOTALL).group()
+    data = json.loads(json_text)
+    
+    # テーブル表示用に整形
+    return [{
+        "日付": data.get("date"),
+        "店舗名": data.get("store_name"),
+        "商品名": item.get("商品名"),
+        "金額": item.get("金額")
+    } for item in data.get("items", [])]
+
+# ==========================================
+# ⚙️ 3. サイドバー (操作パネル)
 # ==========================================
 with st.sidebar:
-    st.image("[https://img.icons8.com/fluency/96/artificial-intelligence.png](https://img.icons8.com/fluency/96/artificial-intelligence.png)", width=60)
+    st.image("https://img.icons8.com/fluency/96/artificial-intelligence.png", width=60)
     st.header("Control Center")
-    st.caption("Gemini 2.5 Flash Edition")
+    st.caption("Advanced Vision Analysis")
+    st.divider()
+    
+    uploaded_file = st.file_uploader("📸 画像を選択", type=['png', 'jpg', 'jpeg'])
+    
+    st.subheader("🛠️ 調整")
+    rotation = st.select_slider("回転 (度)", options=[-90, 0, 90], value=0)
     
     st.divider()
     
-    uploaded_file = st.file_uploader(
-        "📸 レシート画像をアップロード", 
-        type=['png', 'jpg', 'jpeg'],
-        help="スマホで撮影したレシート写真を選択してください。"
-    )
+    analyze_btn = st.button("✨ 解析を実行する", use_container_width=True, type="primary")
     
-    st.divider()
-    
-    # 解析実行ボタン
-    analyze_btn = st.button("✨ Geminiで解析を開始", use_container_width=True, type="primary")
-    
-    if st.button("🗑️ データをリセット", use_container_width=True):
+    if st.button("🗑️ クリア", use_container_width=True):
         st.session_state.parsed_items = []
         st.session_state.ocr_completed = False
         st.rerun()
 
 # ==========================================
-# 🏛️ メインコンテンツ
+# 🏛️ 4. メインエリア
 # ==========================================
 st.title("ReceiptFlow")
-st.markdown("次世代AI **Gemini 2.5 Flash** を活用した超高精度レシートスキャナー。")
-
+st.caption("Powered by Gemini 2.5 Flash | 2026 Professional Edition")
 st.divider()
 
-col_img, col_res = st.columns([1, 1.4], gap="large")
+col_left, col_right = st.columns([1, 1.4], gap="large")
 
 # --- 左：プレビュー ---
-with col_img:
+with col_left:
     st.subheader("📸 Preview")
-    container = st.container(border=True)
-    if uploaded_file:
-        image = Image.open(uploaded_file).convert("RGB")
-        image = ImageOps.exif_transpose(image) # 向きを自動補正
-        container.image(image, use_container_width=True)
-    else:
-        container.info("サイドバーから画像をアップロードしてください。")
+    with st.container(border=True):
+        if uploaded_file:
+            image = Image.open(uploaded_file).convert("RGB")
+            image = ImageOps.exif_transpose(image) # 向き補正
+            if rotation != 0:
+                image = image.rotate(rotation, expand=True)
+            st.image(image, use_container_width=True)
+        else:
+            st.info("サイドバーから画像をアップロードしてください。")
 
 # --- 右：解析結果 ---
-with col_res:
+with col_right:
     st.subheader("📊 Extraction Result")
     
     if analyze_btn:
         if not uploaded_file:
-            st.warning("⚠️ 画像が選択されていません。")
+            st.warning("⚠️ 画像をアップロードしてください。")
         else:
-            with st.status("🤖 Geminiが解析中...", expanded=True) as status:
+            with st.status("🤖 Gemini 2.5 Flashが思考中...", expanded=True) as status:
                 try:
-                    # AI解析実行
-                    result = analyze_receipt_with_gemini(image)
-                    
-                    st.session_state.parsed_items = result["商品一覧"]
+                    # 解析実行
+                    st.session_state.parsed_items = run_gemini_analysis(image)
                     st.session_state.ocr_completed = True
                     status.update(label="✅ 解析が完了しました！", state="complete")
-                    
                 except Exception as e:
-                    status.update(label="🚨 エラー発生", state="error")
-                    st.error(f"解析中にエラーが起きました: {e}")
+                    status.update(label="🚨 エラーが発生しました", state="error")
+                    st.error(f"詳細: {e}")
 
-    # 結果表示
+    # テーブル表示
     if st.session_state.ocr_completed or st.session_state.parsed_items:
         with st.container(border=True):
             df = pd.DataFrame(st.session_state.parsed_items)
@@ -96,16 +119,14 @@ with col_res:
                 df,
                 num_rows="dynamic",
                 use_container_width=True,
-                column_config={
-                    "金額": st.column_config.NumberColumn("金額 (円)", format="%d"),
-                    "商品名": st.column_config.TextColumn("商品名", width="medium"),
-                }
+                column_config={"金額": st.column_config.NumberColumn("金額 (円)", format="%d")}
             )
             st.session_state.parsed_items = edited_df.to_dict('records')
             
             st.divider()
             
-            # ダウンロードボタン
+            # CSVダウンロード
+            from utils.csv_export import convert_to_csv
             csv_bytes = convert_to_csv(st.session_state.parsed_items)
             st.download_button(
                 label="💾 データをCSVでエクスポート",
@@ -117,4 +138,4 @@ with col_res:
             )
 
 st.divider()
-st.caption("© 2026 ReceiptFlow Pro | Powered by Google Gemini 2.5 Flash")
+st.caption("© 2026 ReceiptFlow Pro | High-Performance AI Scanning")

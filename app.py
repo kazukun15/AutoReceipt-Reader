@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from PIL import Image, ImageOps
+import io
 
 # 自作モジュールのインポート
 from ocr.preprocess import preprocess_image
@@ -9,99 +10,148 @@ from ocr.parser import parse_receipt_text
 from utils.csv_export import convert_to_csv
 
 # ==========================================
-# UI設定
+# 1. プロ仕様の初期設定
 # ==========================================
-st.set_page_config(page_title="ReceiptFlow", page_icon="🧾", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="ReceiptFlow | Smart Scanner", 
+    page_icon="🧾", 
+    layout="wide"
+)
 
+# セッション管理
 if "parsed_items" not in st.session_state: st.session_state.parsed_items = []
 if "ocr_completed" not in st.session_state: st.session_state.ocr_completed = False
 
-st.title("ReceiptFlow | Smart Scanner Powered by AI")
-st.markdown("最新のAI Visionモデルを活用し、画像からレシート情報を超高精度に自動抽出・構造化します。")
-st.divider()
-
+# ==========================================
+# 2. サイドバー：操作パネル
+# ==========================================
 with st.sidebar:
-    st.header("⚙️ 操作パネル")
-    uploaded_file = st.file_uploader("📸 レシート画像を選択", type=['png', 'jpg', 'jpeg'])
+    st.title("⚙️ Control Panel")
+    st.markdown("---")
     
-    # 画像回転スライダー
-    rotation_angle = st.slider("🔄 画像の回転 (横向きの場合は調整)", min_value=-90, max_value=90, value=0, step=90)
+    # 画像アップロード
+    uploaded_file = st.file_uploader(
+        "📸 レシートをアップロード", 
+        type=['png', 'jpg', 'jpeg'],
+        help="高解像度のスマホ写真でも自動で最適化されます"
+    )
+    
+    # 画像補正：より直感的なスライダー
+    st.subheader("🛠️ 補正オプション")
+    rotation_angle = st.select_slider(
+        "画像を回転（文字を水平に）",
+        options=[-90, 0, 90],
+        value=0,
+        help="プレビュー画面で文字が正しく読める向きに調整してください"
+    )
     
     st.markdown("---")
+    
+    # 解析実行（メインアクション）
     analyze_btn = st.button("✨ 解析を実行する", use_container_width=True, type="primary")
-    if st.button("🗑️ データをクリア", use_container_width=True):
+    
+    # クリア
+    if st.button("🗑️ データをリセット", use_container_width=True):
         st.session_state.parsed_items = []
         st.session_state.ocr_completed = False
         st.rerun()
 
-col1, col2 = st.columns([1, 1.5])
+# ==========================================
+# 3. メインコンテンツ
+# ==========================================
+st.title("ReceiptFlow")
+st.caption("AI-Powered High-Precision Receipt Analysis System")
 
-# 左カラム：画像プレビュー
-with col1:
+col_left, col_right = st.columns([1, 1.2], gap="large")
+
+# --- 左側：画像プレビュー & 処理 ---
+with col_left:
     st.subheader("📸 Preview")
     if uploaded_file:
         try:
-            # 1. 画像を安全なRGB形式で開く (TypeErrorの完全防止)
-            image = Image.open(uploaded_file).convert('RGB')
+            # プロの画像読み込み：EXIF補正 + RGB正規化
+            raw_image = Image.open(uploaded_file)
+            image = ImageOps.exif_transpose(raw_image).convert("RGB")
             
-            # 2. スマホのEXIF情報（自動回転設定）を補正
-            image = ImageOps.exif_transpose(image)
-            
-            # 3. スライダーの角度に合わせて回転
+            # 回転処理
             if rotation_angle != 0:
                 image = image.rotate(rotation_angle, expand=True)
             
-            # 4. サーバーパンク防止のリサイズ (※変数に代入しないのが正解！)
-            image.thumbnail((1200, 1200))
-            
-            # 5. 画面にプレビュー表示
-            st.image(image, use_container_width=True)
+            # プレビュー表示
+            st.image(image, use_container_width=True, caption="Scan Target")
             
         except Exception as e:
-            st.error(f"画像の読み込みに失敗しました: {e}")
+            st.error(f"画像の読み込みに失敗しました。ファイル形式を確認してください。({e})")
     else:
-        st.info("👈 サイドバーから画像をアップロードしてください。")
+        st.info("👈 サイドバーからレシート画像をアップロードしてください。")
 
-# 右カラム：解析結果
-with col2:
-    st.subheader("📊 抽出結果 (編集可能)")
+# --- 右側：抽出結果 ---
+with col_right:
+    st.subheader("📊 Result")
+    
     if analyze_btn:
-        if uploaded_file is None:
-            st.warning("⚠️ 画像が選択されていません。")
+        if not uploaded_file:
+            st.warning("⚠️ 画像を先にアップロードしてください。")
         else:
-            with st.spinner("🤖 AIがレシートを解析中..."):
+            with st.spinner("🤖 AIが解析中..."):
                 try:
-                    # プレビュー表示時に既にリサイズ＆回転済みなので、そのまま前処理へ渡す
-                    processed_img = preprocess_image(image)
-                    raw_text = extract_text(processed_img)
+                    # 1. サーバー保護：解析用にコピーを作成してリサイズ
+                    process_image_target = image.copy()
+                    process_image_target.thumbnail((1200, 1200)) # メモリ消費を抑制
                     
-                    if not raw_text:
-                        st.error("❌ 文字を読み取れませんでした。プレビュー画面で文字が横向きになっていないか確認してください。")
+                    # 2. OCRパイプライン実行
+                    # 前処理 (OpenCV)
+                    processed_cv_img = preprocess_image(process_image_target)
+                    
+                    # テキスト抽出 (EasyOCR/Tesseract)
+                    extracted_text = extract_text(processed_cv_img)
+                    
+                    if not extracted_text.strip():
+                        st.error("❌ 文字を検出できませんでした。画像の明るさや向きを調整してください。")
                     else:
-                        parsed_data = parse_receipt_text(raw_text)
-                        st.session_state.parsed_items = parsed_data["商品一覧"]
+                        # 3. 構造化解析 (Regex)
+                        parsed_result = parse_receipt_text(extracted_text)
+                        st.session_state.parsed_items = parsed_result["商品一覧"]
                         st.session_state.ocr_completed = True
-                        if not parsed_data["整合性OK"]:
-                            st.warning("⚠️ 商品合計と記載の合計金額が一致しませんでした。")
+                        
+                        # 4. フィードバック
+                        if parsed_result["整合性OK"]:
+                            st.success("✅ 解析完了！合計金額の整合性も確認されました。")
                         else:
-                            st.success("✅ 解析が完了しました！")
+                            st.warning("⚠️ 解析完了。合計金額が合わないため、手動で修正をお願いします。")
+                            
                 except Exception as e:
-                    st.error(f"🚨 エラーが発生しました: {e}")
+                    st.error(f"🚨 解析エンジンでエラーが発生しました: {e}")
 
-    if st.session_state.ocr_completed or len(st.session_state.parsed_items) > 0:
+    # 5. エディタ & エクスポート
+    if st.session_state.ocr_completed or st.session_state.parsed_items:
         df = pd.DataFrame(st.session_state.parsed_items)
-        if df.empty:
-            df = pd.DataFrame(columns=["日付", "店舗名", "商品名", "金額"])
-            st.info("ℹ️ 商品をうまく抽出できませんでした。手動で追加できます。")
-
+        
+        # 編集可能なモダンテーブル
         edited_df = st.data_editor(
-            df, num_rows="dynamic", use_container_width=True,
-            column_config={"金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1, format="%d")}
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "金額": st.column_config.NumberColumn("金額 (円)", format="%d", min_value=0),
+                "商品名": st.column_config.TextColumn("商品名", help="商品名を自由に編集できます"),
+                "日付": st.column_config.TextColumn("日付", width="medium"),
+                "店舗名": st.column_config.TextColumn("店舗名"),
+            }
         )
+        
+        # 編集結果を反映
         st.session_state.parsed_items = edited_df.to_dict('records')
-        st.markdown("---")
-        try:
-            csv_data = convert_to_csv(st.session_state.parsed_items)
-            st.download_button(label="💾 CSVでダウンロード", data=csv_data, file_name="receipt_data.csv", mime="text/csv", type="primary")
-        except Exception as e:
-            st.error(f"🚨 CSV生成失敗: {e}")
+        
+        # CSV出力（Excel対応）
+        csv_bytes = convert_to_csv(st.session_state.parsed_items)
+        st.download_button(
+            label="💾 CSV形式でダウンロード",
+            data=csv_bytes,
+            file_name="receipt_data.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+st.markdown("---")
+st.caption("Advanced OCR Engine: Hybrid EasyOCR & Tesseract")

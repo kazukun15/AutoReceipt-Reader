@@ -1,56 +1,92 @@
-import google.generativeai as genai
 import streamlit as st
-from PIL import Image
-import json
-import re
+import pandas as pd
+from PIL import Image, ImageOps
+from utils.gemini_engine import analyze_receipt_with_gemini
+from utils.csv_export import convert_to_csv
 
-def analyze_receipt_with_gemini(image: Image.Image):
-    """
-    Gemini 2.5 Flashを使用してレシートを解析し、構造化データを返します。
-    """
-    # APIキーの設定
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    genai.configure(api_key=api_key)
+# ==========================================
+# 1. ページ設定
+# ==========================================
+st.set_page_config(page_title="ReceiptFlow | Gemini Edition", page_icon="🧾", layout="wide")
 
-    # モデルの初期化 (2026年最新の2.5 Flash)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+if "parsed_items" not in st.session_state: st.session_state.parsed_items = []
+if "ocr_completed" not in st.session_state: st.session_state.ocr_completed = False
 
-    # AIへの指示（プロンプト）
-    prompt = """
-    このレシート画像を解析し、以下の項目を正確に抽出してJSON形式で返してください。
+# ==========================================
+# 2. サイドバー
+# ==========================================
+with st.sidebar:
+    st.title("⚙️ Control Panel")
+    st.markdown("---")
+    uploaded_file = st.file_uploader("📸 レシートをアップロード", type=['png', 'jpg', 'jpeg'])
     
-    1. store_name (店舗名)
-    2. date (日付: YYYY/MM/DD形式)
-    3. items (商品一覧: 各要素は {"商品名": str, "金額": int} の形式)
-    4. total_price (合計金額: int)
+    st.info("💡 Gemini 2.5 Flash搭載。画像が横向きでも自動で補正して解析します。")
     
-    注意点:
-    - 読み取れない項目がある場合は null にしてください。
-    - 余計な解説は不要です。JSONデータのみを返してください。
-    """
+    st.markdown("---")
+    analyze_btn = st.button("✨ Geminiで解析を実行", use_container_width=True, type="primary")
+    
+    if st.button("🗑️ データをリセット", use_container_width=True):
+        st.session_state.parsed_items = []
+        st.session_state.ocr_completed = False
+        st.rerun()
 
-    try:
-        # 画像とプロンプトを送信
-        response = model.generate_content([prompt, image])
+# ==========================================
+# 3. メインコンテンツ
+# ==========================================
+st.title("ReceiptFlow")
+st.caption("Powered by Gemini 2.5 Flash Vision API")
+
+col_left, col_right = st.columns([1, 1.2], gap="large")
+
+with col_left:
+    st.subheader("📸 Preview")
+    if uploaded_file:
+        image = Image.open(uploaded_file).convert("RGB")
+        image = ImageOps.exif_transpose(image)
+        st.image(image, use_container_width=True, caption="Target Image")
+    else:
+        st.info("👈 サイドバーから画像をアップロードしてください。")
+
+with col_right:
+    st.subheader("📊 Extraction Result")
+    
+    if analyze_btn:
+        if not uploaded_file:
+            st.warning("⚠️ 画像をアップロードしてください。")
+        else:
+            with st.spinner("🤖 Geminiが画像を読み取っています..."):
+                try:
+                    # Gemini解析の実行
+                    result = analyze_receipt_with_gemini(image)
+                    
+                    st.session_state.parsed_items = result["商品一覧"]
+                    st.session_state.ocr_completed = True
+                    st.success("✅ Geminiによる高度解析が完了しました！")
+                except Exception as e:
+                    st.error(f"🚨 解析エラー: {e}")
+                    st.info("Tips: StreamlitのSecretsにAPIキーが設定されているか確認してください。")
+
+    if st.session_state.ocr_completed or st.session_state.parsed_items:
+        df = pd.DataFrame(st.session_state.parsed_items)
         
-        # 返信からJSON部分を抽出
-        json_text = re.search(r'\{.*\}', response.text, re.DOTALL).group()
-        data = json.loads(json_text)
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "金額": st.column_config.NumberColumn("金額 (円)", format="%d"),
+            }
+        )
+        st.session_state.parsed_items = edited_df.to_dict('records')
         
-        # UIに合わせたデータ形式に変換
-        formatted_items = []
-        for item in data.get("items", []):
-            formatted_items.append({
-                "日付": data.get("date"),
-                "店舗名": data.get("store_name"),
-                "商品名": item.get("商品名"),
-                "金額": item.get("金額")
-            })
-            
-        return {
-            "商品一覧": formatted_items,
-            "合計金額": data.get("total_price", 0),
-            "整合性OK": True # Geminiは文脈判断するため基本OKとする
-        }
-    except Exception as e:
-        raise Exception(f"Gemini解析エラー: {str(e)}")
+        csv_bytes = convert_to_csv(st.session_state.parsed_items)
+        st.download_button(
+            label="💾 CSVでダウンロード",
+            data=csv_bytes,
+            file_name="receipt_gemini_data.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+st.markdown("---")
+st.caption("Next Generation Receipt Scanning System | 2026 Model")

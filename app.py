@@ -9,7 +9,7 @@ import time
 # 🎨 UI設定 (モダンなミニマルデザイン)
 # ==========================================
 st.set_page_config(
-    page_title="ReceiptFlow | Smart Scanner",
+    page_title="ReceiptFlow | Batch Scanner",
     page_icon="🧾",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -18,20 +18,17 @@ st.set_page_config(
 # セッションステートの初期化
 if "parsed_items" not in st.session_state:
     st.session_state.parsed_items = []
-if "receipt_meta" not in st.session_state:
-    st.session_state.receipt_meta = {"store": "", "date": "", "total": 0}
 
 # ==========================================
 # 🔑 Gemini APIの初期設定
 # ==========================================
-# StreamlitのSecretsからAPIキーを安全に取得
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
     st.error("🚨 Streamlit Cloudの Settings > Secrets に `GEMINI_API_KEY` を設定してください。")
     st.stop()
 
 genai.configure(api_key=api_key)
-# 無料で使えて最高性能・最速のモデルを指定
+# 無料枠で最大パフォーマンスを発揮する最新のFlashモデルを使用
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # ==========================================
@@ -58,117 +55,141 @@ SYSTEM_PROMPT = """
 # ==========================================
 # 🖥️ メイン画面 UI
 # ==========================================
-st.title("🧾 ReceiptFlow | Powered by Gemini")
-st.markdown("最新のAI Visionモデルを活用し、画像からレシート情報を超高精度に自動抽出・構造化します。")
+st.title("🧾 ReceiptFlow | Batch Scanner Powered by AI")
+st.markdown("複数枚のレシートを一括でアップロードし、すべてのデータを1つのテーブルに自動集約します。")
 st.divider()
 
 # サイドバー
 with st.sidebar:
     st.header("⚙️ 操作パネル")
-    uploaded_file = st.file_uploader("📸 レシート画像を選択", type=['png', 'jpg', 'jpeg'])
+    # 【変更点】accept_multiple_files=True で複数選択を可能に
+    uploaded_files = st.file_uploader(
+        "📸 レシート画像を選択（複数可）", 
+        type=['png', 'jpg', 'jpeg'], 
+        accept_multiple_files=True,
+        help="一度に20枚程度まで一括解析可能です。"
+    )
     
     st.markdown("---")
-    analyze_btn = st.button("✨ AI解析を実行", use_container_width=True, type="primary")
+    analyze_btn = st.button("✨ 一括解析を実行", use_container_width=True, type="primary")
     if st.button("🗑️ データをクリア", use_container_width=True):
         st.session_state.parsed_items = []
-        st.session_state.receipt_meta = {"store": "", "date": "", "total": 0}
         st.rerun()
 
-col1, col2 = st.columns([1, 1.5])
+# カラム分割
+col1, col2 = st.columns([1, 1.8])
 
-# 🖼️ 左カラム：画像プレビュー
+# 🖼️ 左カラム：画像プレビュー（複数対応）
 with col1:
     st.subheader("📸 Preview")
-    if uploaded_file:
-        try:
-            # 画像を安全に読み込み、スマホの回転を補正
-            image = Image.open(uploaded_file).convert('RGB')
-            image = ImageOps.exif_transpose(image)
-            st.image(image, use_container_width=True, caption="アップロードされたレシート")
-        except Exception as e:
-            st.error(f"画像の読み込みに失敗しました: {e}")
-            image = None
+    if uploaded_files:
+        st.info(f"📂 **{len(uploaded_files)}枚** の画像が選択されています。")
+        # 画面が縦に長くなりすぎないよう、Expander（折りたたみ）の中にサムネイルを表示
+        with st.expander("プレビュー画像一覧を確認する", expanded=False):
+            for file in uploaded_files:
+                try:
+                    img = Image.open(file).convert('RGB')
+                    img = ImageOps.exif_transpose(img)
+                    st.image(img, caption=file.name, use_container_width=True)
+                except Exception:
+                    st.error(f"{file.name} はプレビューできません。")
     else:
-        st.info("👈 サイドバーから画像をアップロードしてください。")
-        image = None
+        st.info("👈 サイドバーから画像を複数アップロードしてください。")
 
 # 📊 右カラム：解析結果
 with col2:
     st.subheader("📊 抽出結果 (編集可能)")
     
     if analyze_btn:
-        if image is None:
+        if not uploaded_files:
             st.warning("⚠️ 画像が選択されていません。")
         else:
-            with st.spinner("🤖 Gemini AIがレシートを解析中..."):
+            # 複数枚のデータをまとめるための空リスト
+            all_parsed_data = []
+            
+            # UI用のプログレスバーとテキストを用意
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for i, file in enumerate(uploaded_files):
+                status_text.markdown(f"**⏳ 解析中 ({i+1}/{len(uploaded_files)}枚目)...** `{file.name}`")
+                
                 try:
-                    # 通信量削減のため、リサイズしたコピー画像をAIに渡す
+                    # 1. 画像の読み込みとリサイズ
+                    image = Image.open(file).convert('RGB')
+                    image = ImageOps.exif_transpose(image)
                     ai_image = image.copy()
                     ai_image.thumbnail((1024, 1024))
                     
-                    # Gemini API呼び出し
+                    # 2. Gemini API呼び出し
                     response = model.generate_content([SYSTEM_PROMPT, ai_image])
                     res_text = response.text.strip()
                     
-                    # Markdownのコードブロック記号が含まれていたら除去
-                    if res_text.startswith("```json"):
-                        res_text = res_text[7:]
-                    if res_text.startswith("```"):
-                        res_text = res_text[3:]
-                    if res_text.endswith("```"):
-                        res_text = res_text[:-3]
+                    # 3. JSONクレンジング
+                    if res_text.startswith("```json"): res_text = res_text[7:]
+                    if res_text.startswith("```"): res_text = res_text[3:]
+                    if res_text.endswith("```"): res_text = res_text[:-3]
                         
-                    # JSONとしてパース
+                    # 4. JSONパース
                     data = json.loads(res_text.strip())
+                    store = data.get("store_name", "")
+                    date = data.get("date", "")
                     
-                    # セッションステートに保存
-                    st.session_state.receipt_meta = {
-                        "store": data.get("store_name", ""),
-                        "date": data.get("date", ""),
-                        "total": data.get("total_price", 0)
-                    }
-                    st.session_state.parsed_items = data.get("items", [])
-                    st.success("✅ 解析が完了しました！")
-                    
-                except json.JSONDecodeError:
-                    st.error("❌ AIからの応答を正しく読み取れませんでした。もう一度お試しください。")
+                    # 5. 全データリストへ追加（後で分かりやすいよう、元のファイル名も追加）
+                    for item in data.get("items", []):
+                        all_parsed_data.append({
+                            "ファイル名": file.name,
+                            "日付": date,
+                            "店舗名": store,
+                            "商品名": item.get("name", ""),
+                            "金額": item.get("price", 0)
+                        })
+                        
                 except Exception as e:
-                    error_msg = str(e).lower()
-                    # 429エラー (クォータ超過) のハンドリング
-                    if "429" in error_msg or "quota" in error_msg:
-                        st.error("⏳ 無料枠の制限(連続リクエスト)に達しました。約1分待ってから再度お試しください。")
-                    else:
-                        st.error(f"🚨 予期せぬエラーが発生しました: {e}")
+                    st.error(f"🚨 `{file.name}` の処理中にエラーが発生しました: {e}")
+                
+                # プログレスバーの更新
+                progress_bar.progress((i + 1) / len(uploaded_files))
+                
+                # 【重要】無料APIのレートリミット（1分間15回）を回避するための待機時間
+                if i < len(uploaded_files) - 1:
+                    time.sleep(4.5) 
+            
+            # すべて終わったらセッションステートに保存して完了通知
+            st.session_state.parsed_items = all_parsed_data
+            status_text.success(f"✨ 全 {len(uploaded_files)} 枚の解析が完了しました！")
 
     # テーブルの表示処理
     if len(st.session_state.parsed_items) > 0:
-        meta = st.session_state.receipt_meta
-        st.markdown(f"**🏢 店舗名:** {meta['store']}　｜　**📅 日付:** {meta['date']}　｜　**💰 記載合計:** {meta['total']}円")
-        
-        # DataFrame化
         df = pd.DataFrame(st.session_state.parsed_items)
-        # カラム名が英語なので日本語に変換
-        if not df.empty and "name" in df.columns and "price" in df.columns:
-            df = df.rename(columns={"name": "商品名", "price": "金額"})
-            # 日付と店舗名を追加
-            df.insert(0, "店舗名", meta["store"])
-            df.insert(0, "日付", meta["date"])
+        
+        # カラムの順番を整理
+        expected_columns = ["ファイル名", "日付", "店舗名", "商品名", "金額"]
+        for col in expected_columns:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[expected_columns]
             
         edited_df = st.data_editor(
             df, 
             num_rows="dynamic", 
             use_container_width=True,
-            column_config={"金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1, format="%d")}
+            column_config={
+                "金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1, format="%d"),
+                "ファイル名": st.column_config.TextColumn("ファイル名", disabled=True) # ファイル名は編集不可にする
+            }
         )
         
+        st.session_state.parsed_items = edited_df.to_dict('records')
         st.markdown("---")
+        
         try:
             # CSVダウンロード
             csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="💾 CSVでダウンロード", 
+                label="💾 結合されたデータをCSVで一括ダウンロード", 
                 data=csv_data, 
-                file_name="receipt_data.csv", 
+                file_name="receipt_batch_data.csv", 
                 mime="text/csv", 
                 type="primary"
             )

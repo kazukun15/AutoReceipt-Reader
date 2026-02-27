@@ -1,92 +1,107 @@
 import streamlit as st
 import pandas as pd
 from PIL import Image, ImageOps
-from utils.gemini_engine import analyze_receipt_with_gemini
+
+# 自作モジュールのインポート
+from ocr.preprocess import preprocess_image
+from ocr.reader import extract_text
+from ocr.parser import parse_receipt_text
 from utils.csv_export import convert_to_csv
 
 # ==========================================
-# 1. ページ設定
+# UI設定
 # ==========================================
-st.set_page_config(page_title="ReceiptFlow | Gemini Edition", page_icon="🧾", layout="wide")
+st.set_page_config(page_title="ReceiptFlow", page_icon="🧾", layout="wide", initial_sidebar_state="expanded")
 
 if "parsed_items" not in st.session_state: st.session_state.parsed_items = []
 if "ocr_completed" not in st.session_state: st.session_state.ocr_completed = False
 
-# ==========================================
-# 2. サイドバー
-# ==========================================
+st.title("ReceiptFlow | Smart Scanner Powered by AI")
+st.markdown("最新のAI Visionモデルを活用し、画像からレシート情報を超高精度に自動抽出・構造化します。")
+st.divider()
+
 with st.sidebar:
-    st.title("⚙️ Control Panel")
+    st.header("⚙️ 操作パネル")
+    uploaded_file = st.file_uploader("📸 レシート画像を選択", type=['png', 'jpg', 'jpeg'])
+    
+    # 画像回転スライダー
+    rotation_angle = st.slider("🔄 画像の回転 (横向きの場合は調整)", min_value=-90, max_value=90, value=0, step=90)
+    
     st.markdown("---")
-    uploaded_file = st.file_uploader("📸 レシートをアップロード", type=['png', 'jpg', 'jpeg'])
-    
-    st.info("💡 Gemini 2.5 Flash搭載。画像が横向きでも自動で補正して解析します。")
-    
-    st.markdown("---")
-    analyze_btn = st.button("✨ Geminiで解析を実行", use_container_width=True, type="primary")
-    
-    if st.button("🗑️ データをリセット", use_container_width=True):
+    analyze_btn = st.button("✨ 解析を実行する", use_container_width=True, type="primary")
+    if st.button("🗑️ データをクリア", use_container_width=True):
         st.session_state.parsed_items = []
         st.session_state.ocr_completed = False
         st.rerun()
 
-# ==========================================
-# 3. メインコンテンツ
-# ==========================================
-st.title("ReceiptFlow")
-st.caption("Powered by Gemini 2.5 Flash Vision API")
+col1, col2 = st.columns([1, 1.5])
 
-col_left, col_right = st.columns([1, 1.2], gap="large")
-
-with col_left:
+# 左カラム：画像プレビュー
+with col1:
     st.subheader("📸 Preview")
     if uploaded_file:
-        image = Image.open(uploaded_file).convert("RGB")
-        image = ImageOps.exif_transpose(image)
-        st.image(image, use_container_width=True, caption="Target Image")
+        try:
+            # 1. 画像を安全なRGB形式で開く (TypeErrorの完全防止)
+            image = Image.open(uploaded_file).convert('RGB')
+            
+            # 2. スマホのEXIF情報（自動回転設定）を補正
+            image = ImageOps.exif_transpose(image)
+            
+            # 3. スライダーの角度に合わせて回転
+            if rotation_angle != 0:
+                image = image.rotate(rotation_angle, expand=True)
+            
+            # 4. サーバーパンク防止のリサイズ (※変数に代入しないのが正解！)
+            image.thumbnail((1200, 1200))
+            
+            # 5. 画面にプレビュー表示
+            st.image(image, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"画像の読み込みに失敗しました: {e}")
     else:
         st.info("👈 サイドバーから画像をアップロードしてください。")
 
-with col_right:
-    st.subheader("📊 Extraction Result")
-    
+# 右カラム：解析結果
+with col2:
+    st.subheader("📊 抽出結果 (編集可能)")
     if analyze_btn:
-        if not uploaded_file:
-            st.warning("⚠️ 画像をアップロードしてください。")
+        if uploaded_file is None:
+            st.warning("⚠️ 画像が選択されていません。")
         else:
-            with st.spinner("🤖 Geminiが画像を読み取っています..."):
+            with st.spinner("🤖 AIがレシートを解析中..."):
                 try:
-                    # Gemini解析の実行
-                    result = analyze_receipt_with_gemini(image)
+                    # プレビュー表示時に既にリサイズ＆回転済みなので、そのまま前処理へ渡す
+                    processed_img = preprocess_image(image)
+                    raw_text = extract_text(processed_img)
                     
-                    st.session_state.parsed_items = result["商品一覧"]
-                    st.session_state.ocr_completed = True
-                    st.success("✅ Geminiによる高度解析が完了しました！")
+                    if not raw_text:
+                        st.error("❌ 文字を読み取れませんでした。プレビュー画面で文字が横向きになっていないか確認してください。")
+                    else:
+                        parsed_data = parse_receipt_text(raw_text)
+                        st.session_state.parsed_items = parsed_data["商品一覧"]
+                        st.session_state.ocr_completed = True
+                        if not parsed_data["整合性OK"]:
+                            st.warning("⚠️ 商品合計と記載の合計金額が一致しませんでした。")
+                        else:
+                            st.success("✅ 解析が完了しました！")
                 except Exception as e:
-                    st.error(f"🚨 解析エラー: {e}")
-                    st.info("Tips: StreamlitのSecretsにAPIキーが設定されているか確認してください。")
+                    st.error(f"🚨 エラーが発生しました: {e}")
 
-    if st.session_state.ocr_completed or st.session_state.parsed_items:
+    if st.session_state.ocr_completed or len(st.session_state.parsed_items) > 0:
         df = pd.DataFrame(st.session_state.parsed_items)
-        
+        if df.empty:
+            df = pd.DataFrame(columns=["日付", "店舗名", "商品名", "金額"])
+            st.info("ℹ️ 商品をうまく抽出できませんでした。手動で追加できます。")
+
         edited_df = st.data_editor(
-            df,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "金額": st.column_config.NumberColumn("金額 (円)", format="%d"),
-            }
+            df, num_rows="dynamic", use_container_width=True,
+            column_config={"金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1, format="%d")}
         )
         st.session_state.parsed_items = edited_df.to_dict('records')
-        
-        csv_bytes = convert_to_csv(st.session_state.parsed_items)
-        st.download_button(
-            label="💾 CSVでダウンロード",
-            data=csv_bytes,
-            file_name="receipt_gemini_data.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
-st.markdown("---")
-st.caption("Next Generation Receipt Scanning System | 2026 Model")
+        st.markdown("---")
+        try:
+            csv_data = convert_to_csv(st.session_state.parsed_items)
+            st.download_button(label="💾 CSVでダウンロード", data=csv_data, file_name="receipt_data.csv", mime="text/csv", type="primary")
+        except Exception as e:
+            st.error(f"🚨 CSV生成失敗: {e}")

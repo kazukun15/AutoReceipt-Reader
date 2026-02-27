@@ -9,19 +9,12 @@ from ocr.parser import parse_receipt_text
 from utils.csv_export import convert_to_csv
 
 # ==========================================
-# UI設定 (モダンなミニマルデザイン)
+# UI設定
 # ==========================================
-st.set_page_config(
-    page_title="レシート読取アプリ",
-    page_icon="🧾",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="レシート読取アプリ", page_icon="🧾", layout="wide", initial_sidebar_state="expanded")
 
-if "parsed_items" not in st.session_state:
-    st.session_state.parsed_items = []
-if "ocr_completed" not in st.session_state:
-    st.session_state.ocr_completed = False
+if "parsed_items" not in st.session_state: st.session_state.parsed_items = []
+if "ocr_completed" not in st.session_state: st.session_state.ocr_completed = False
 
 st.title("🧾 レシート自動読取・CSV出力ツール")
 st.markdown("画像からレシートの情報を自動抽出し、データ化します。修正後はCSVでダウンロード可能です。")
@@ -54,6 +47,9 @@ with col2:
         else:
             with st.spinner("🤖 AIがレシートを解析中..."):
                 try:
+                    # 【追加】スマホの高画質写真でサーバーがメモリ不足になるのを防ぐため、画像をリサイズ
+                    image.thumbnail((1200, 1200))
+                    
                     processed_img = preprocess_image(image)
                     raw_text = extract_text(processed_img)
                     if not raw_text:

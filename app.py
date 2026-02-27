@@ -1,26 +1,88 @@
-import cv2
-import numpy as np
+import streamlit as st
+import pandas as pd
 from PIL import Image
 
-def preprocess_image(image_pil: Image.Image) -> np.ndarray:
-    img_array = np.array(image_pil)
-    if len(img_array.shape) == 3 and img_array.shape[2] >= 3:
-        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+# 自作モジュールのインポート
+from ocr.preprocess import preprocess_image
+from ocr.reader import extract_text
+from ocr.parser import parse_receipt_text
+from utils.csv_export import convert_to_csv
+
+# ==========================================
+# UI設定 (モダンなミニマルデザイン)
+# ==========================================
+st.set_page_config(
+    page_title="レシート読取アプリ",
+    page_icon="🧾",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+if "parsed_items" not in st.session_state:
+    st.session_state.parsed_items = []
+if "ocr_completed" not in st.session_state:
+    st.session_state.ocr_completed = False
+
+st.title("🧾 レシート自動読取・CSV出力ツール")
+st.markdown("画像からレシートの情報を自動抽出し、データ化します。修正後はCSVでダウンロード可能です。")
+st.divider()
+
+with st.sidebar:
+    st.header("⚙️ 操作パネル")
+    uploaded_file = st.file_uploader("📸 レシート画像を選択", type=['png', 'jpg', 'jpeg'])
+    st.markdown("---")
+    analyze_btn = st.button("✨ 解析を実行する", use_container_width=True, type="primary")
+    if st.button("🗑️ データをクリア", use_container_width=True):
+        st.session_state.parsed_items = []
+        st.session_state.ocr_completed = False
+        st.rerun()
+
+col1, col2 = st.columns([1, 1.5])
+with col1:
+    st.subheader("🖼️ 画像プレビュー")
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="アップロードされたレシート", use_container_width=True)
     else:
-        img_cv = img_array
+        st.info("👈 サイドバーから画像をアップロードしてください。")
 
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
-    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+with col2:
+    st.subheader("📊 抽出結果 (編集可能)")
+    if analyze_btn:
+        if uploaded_file is None:
+            st.warning("⚠️ 画像が選択されていません。")
+        else:
+            with st.spinner("🤖 AIがレシートを解析中..."):
+                try:
+                    processed_img = preprocess_image(image)
+                    raw_text = extract_text(processed_img)
+                    if not raw_text:
+                        st.error("❌ 文字を読み取れませんでした。")
+                    else:
+                        parsed_data = parse_receipt_text(raw_text)
+                        st.session_state.parsed_items = parsed_data["商品一覧"]
+                        st.session_state.ocr_completed = True
+                        if not parsed_data["整合性OK"]:
+                            st.warning("⚠️ 商品合計と記載の合計金額が一致しませんでした。")
+                        else:
+                            st.success("✅ 解析が完了しました！")
+                except Exception as e:
+                    st.error(f"🚨 エラーが発生しました: {e}")
 
-    coords = np.column_stack(np.where(cv2.bitwise_not(binary) > 0))
-    if len(coords) > 0:
-        angle = cv2.minAreaRect(coords)[-1]
-        if angle < -45: angle = -(90 + angle)
-        else: angle = -angle
-        (h, w) = binary.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(binary, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-        return rotated
-    return binary
+    if st.session_state.ocr_completed or len(st.session_state.parsed_items) > 0:
+        df = pd.DataFrame(st.session_state.parsed_items)
+        if df.empty:
+            df = pd.DataFrame(columns=["日付", "店舗名", "商品名", "金額"])
+            st.info("ℹ️ 商品をうまく抽出できませんでした。手動で追加できます。")
+
+        edited_df = st.data_editor(
+            df, num_rows="dynamic", use_container_width=True,
+            column_config={"金額": st.column_config.NumberColumn("金額 (円)", min_value=0, step=1, format="%d")}
+        )
+        st.session_state.parsed_items = edited_df.to_dict('records')
+        st.markdown("---")
+        try:
+            csv_data = convert_to_csv(st.session_state.parsed_items)
+            st.download_button(label="💾 CSVでダウンロード", data=csv_data, file_name="receipt_data.csv", mime="text/csv", type="primary")
+        except Exception as e:
+            st.error(f"🚨 CSV生成失敗: {e}")
